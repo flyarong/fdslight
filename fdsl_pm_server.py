@@ -330,53 +330,27 @@ def __stop_service():
     pid = proc.get_pid(PID_FILE)
 
     if pid < 0:
-        print("cannot found fdslight server process")
+        print("cannot found fdslight port map server process")
         return
 
     os.kill(pid, signal.SIGINT)
 
 
-def __update_configs():
-    pid = proc.get_pid(PID_FILE)
-
-    if pid < 0:
-        print("cannot found fdslight port map server process")
-        return
-
-    os.kill(pid, signal.SIGUSR1)
-
-
 def main():
     help_doc = """
     -d      debug | start | stop    debug,start or stop application
-    -u      rules                   update rules         
     """
     try:
-        opts, args = getopt.getopt(sys.argv[1:], "u:m:d:", ["enable_nat_module"])
+        opts, args = getopt.getopt(sys.argv[1:], "d:", [])
     except getopt.GetoptError:
         print(help_doc)
         return
-    d = ""
-    u = ""
+    d = None
 
     enable_nat_module = False
 
     for k, v in opts:
         if k == "-d": d = v
-        if k == "-u": u = v
-        if k == "--enable_nat_module": enable_nat_module = True
-
-    if not u and not d:
-        print(help_doc)
-        return
-
-    if u and u != "user_configs":
-        print(help_doc)
-        return
-
-    if u:
-        __update_configs()
-        return
 
     if not d:
         print(help_doc)

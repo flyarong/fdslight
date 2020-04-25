@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """端口映射的基本访问类
 """
-import freenet.lib.logging as logging
 import freenet.lib.base_proto.utils as proto_utils
 
 import pywind.lib.timer as timer
@@ -71,7 +70,9 @@ class base(object):
 
     def set_map_info(self, key: str, address: str, protocol: str, port: int, is_ipv6=False):
         k = self.__build_key(address, protocol, port, is_ipv6=is_ipv6)
+
         self.__map_info[k] = (proto_utils.calc_content_md5(key.encode()), key,)
+        self.__serviced.set_port_map(address, protocol, port, is_ipv6=is_ipv6)
 
     def get_map_rule(self, byte_ip, proto_num, port, is_ipv6=False):
         """
@@ -95,12 +96,6 @@ class base(object):
     @property
     def map_info(self):
         return self.__map_info
-
-    def change_map_rule(self):
-        """改变映射规则,重写这个方法,该函数用于程序不重新启动的情况下更改端口映射规则
-        :return:
-        """
-        pass
 
     def get_session(self, session_id):
         return self.__sessions.get(session_id, -1)

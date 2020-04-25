@@ -26,6 +26,7 @@ class access(access_base.base):
             if not self.check(o):
                 logging.print_error("wrong port map rule:%s" % str(o))
                 break
+            self.set_map_info(k, o["address"], o["protocol"], o["port"], is_ipv6=o["is_ipv6"])
 
     def check(self, o):
         keys = (
@@ -47,6 +48,3 @@ class access(access_base.base):
         if not is_ipv6 and not utils.is_ipv4_address(address): return False
 
         return True
-
-    def change_map_rule(self):
-        self.myinit()
