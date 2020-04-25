@@ -274,7 +274,10 @@ class _fdslight_pm_server(dispatcher.dispatcher):
                 "iptables -t nat -I POSTROUTING -p %s --dport %d -j MASQUERADE" % (protocol, port,)
             ]
         else:
-            cmds = []
+            cmds = [
+                "ip6tables -t nat -I PREROUTING -p %s --dport %d -j DNAT --to %s" % (protocol, port, address,),
+                "ip6tables -t nat -I POSTROUTING -p %s --dport %d -j MASQUERADE" % (protocol, port,)
+            ]
 
         for cmd in cmds: os.system(cmd)
 
