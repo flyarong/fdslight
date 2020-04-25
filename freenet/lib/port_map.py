@@ -72,7 +72,7 @@ class port_map(object):
         byte_dest_ip = socket.inet_pton(fa, dest_ip)
 
         self.__in_rules[in_key] = (out_key, byte_rewrite_dest_ip, p, rewrite_dest_port,)
-        self.__out_rules[out_key] = (in_key, byte_dest_ip, p, byte_dest_ip,)
+        self.__out_rules[out_key] = (in_key, byte_dest_ip, p, dest_port,)
 
     def find_rule_for_in(self, byte_dest_ip: bytes, proto: int, dest_port: int):
         key = self.__build_key2(byte_dest_ip, proto, dest_port)

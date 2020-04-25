@@ -26,6 +26,10 @@ def __build_fdsl_ctl(cflags):
     )
 
 
+def build_port_map(cflags):
+    __build_fn_utils(cflags)
+
+
 def build_server(cflags, kern_nat_mod=False):
     __build_fn_utils(cflags)
     __build_fdsl_ctl(cflags)
@@ -77,7 +81,7 @@ def build_client(cflags, gw_mode=False):
 
 def main():
     help_doc = """
-    gateway | server | local  python3_include
+    gateway | server | local | port_map  python3_include
     """
 
     argv = sys.argv[1:]
@@ -87,7 +91,7 @@ def main():
 
     mode = argv[0]
 
-    if mode not in ("gateway", "server", "local", "public_ip_client",):
+    if mode not in ("gateway", "server", "local", "port_map",):
         print("the mode must be gateway,server or local")
         return
 
@@ -103,6 +107,10 @@ def main():
 
     if mode == "server":
         build_server(cflags)
+        return
+
+    if mode == "port_map":
+        build_port_map(cflags)
         return
 
     if mode == "local": build_client(cflags, gw_mode=False)

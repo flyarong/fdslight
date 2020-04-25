@@ -35,17 +35,74 @@ def __calc_udp_csum(saddr, daddr, udp_data, is_ipv6=False):
     return csum
 
 
-def modify_port(port, protocol, mbuf, flags=0, is_ipv6=False):
+def __get_ip4_hdrlen(mbuf):
+    mbuf.offset = 0
+    n = mbuf.get_part(1)
+    hdrlen = (n & 0x0f) * 4
+
+    return hdrlen
+
+
+def __get_protocol(mbuf):
+    ip_ver = mbuf.ip_version()
+    if ip_ver == 4:
+        mbuf.offset = 9
+        p = mbuf.get_part(1)
+    else:
+        mbuf.offset = 6
+        p = mbuf.get_part(1)
+
+    return p
+
+
+def modify_port(port, mbuf, flags=0):
     """修改TCP/SCTP/UDP/UDPLite端口
     :param port:
-    :param protocol:支持的协议是6,17,132以及136
     :param mbuf:
     :param flags: 0表示修改源端口,1表示修改目的端口
     :return:
     """
     protocols = (6, 17, 132, 136,)
-    if protocol not in protocols:
-        raise ValueError("unsupport protocol number %d" % protocol)
+    ip_ver = mbuf.ip_version
+    p = __get_protocol(mbuf)
+
+    if p not in protocols:
+        raise ValueError("unsupport IP protocol for modify port")
+
+    if ip_ver == 4:
+        hdrlen = __get_ip4_hdrlen(mbuf)
+    else:
+        hdrlen = 40
+
+    if flags == 0:
+        port_off = hdrlen
+    else:
+        port_off = hdrlen + 2
+
+    mbuf.offset = port_off
+    # SCTP特别处理
+    if p == 132:
+        mbuf.replace(utils.number2bytes(port, 2))
+        return
+
+    old_port = utils.bytes2number(mbuf.get_part(2))
+
+    if p in (6, 136,):
+        csum_offset = hdrlen + 6
+    else:
+        csum_offset = hdrlen + 16
+
+    mbuf.offset = csum_offset
+    csum = utils.bytes2number(mbuf.get_part(2))
+    # 如果旧的校检和为0,说明不需要进行校检和计算
+    if csum == 0: return
+
+    mbuf.offset = port_off
+    mbuf.replace(utils.number2bytes(port, 2))
+
+    mbuf.offset = csum_offset
+    csum = fn_utils.calc_incre_csum(csum, old_port, port)
+    mbuf.replace(utils.number2bytes(csum, 2))
 
 
 def modify_ip4address(ip_packet, mbuf, flags=0):
@@ -103,7 +160,7 @@ def modify_ip6address(ip_packet, mbuf, flags=0):
     if nexthdr == 58:
         modify_icmp6_echo_for_change(ip_packet, mbuf, flags=flags)
 
-    if nexthdr in (6, 17, 132, 136,):
+    if nexthdr in (6, 17, 136,):
         if nexthdr == 6:
             p = 1
         else:
@@ -153,7 +210,7 @@ def modify_tcpudp_for_change(ip_packet, mbuf, proto, flags=0, is_ipv6=False):
     """ 修改传输层(SCTP,TCP,UDP,UDPLite,)内容
     :param ip_packet:
     :param ip_packet_list:
-    :param proto: 0表示计算的UDP,SCTP以及UDPLITE,1表示计算的TCP
+    :param proto: 0表示计算的UDP以及UDPLITE,1表示计算的TCP
     :param flags: 0 表示修改时的源地址,1表示修改的是目的地址
     :param is_ipv6:表示是否是否是IPV6
     :return:

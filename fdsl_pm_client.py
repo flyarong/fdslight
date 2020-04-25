@@ -45,8 +45,7 @@ class _fdslight_pm_client(dispatcher.dispatcher):
     __udp_crypto = None
     __crypto_configs = None
 
-    __support_ip4_protocols = (6, 17, 132, 136,)
-    __support_ip6_protocols = (6, 17, 132, 136,)
+    __support_protocols = (6, 17, 132, 136,)
     # 服务器地址
     __server_ip = None
 
@@ -75,7 +74,7 @@ class _fdslight_pm_client(dispatcher.dispatcher):
 
         return pyo
 
-    def init_func(self, mode, debug, configs):
+    def init_func(self, debug, configs):
         self.create_poll()
 
         signal.signal(signal.SIGINT, self.__exit)
@@ -97,8 +96,8 @@ class _fdslight_pm_client(dispatcher.dispatcher):
 
         m = "freenet.lib.crypto.noany"
         try:
-            self.__tcp_crypto = importlib.import_module("%s.%s_tcp" % (m, conn["crypto_module"]))
-            self.__udp_crypto = importlib.import_module("%s.%s_udp" % (m, conn["crypto_module"]))
+            self.__tcp_crypto = importlib.import_module("%s.noany_tcp" % m)
+            self.__udp_crypto = importlib.import_module("%s.noany_udp" % m)
         except ImportError:
             print("cannot found tcp or udp crypto module")
             sys.exit(-1)
@@ -122,6 +121,67 @@ class _fdslight_pm_client(dispatcher.dispatcher):
             sys.stderr = open(ERR_FILE, "a+")
         ''''''
 
+    def __handle_ipv4_msg_from_tundev(self):
+        self.__mbuf.offset = 9
+        protocol = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 12
+        byte_saddr = self.__mbuf.get_part(4)
+
+        if protocol not in self.__support_protocols: return
+
+        hdrlen = self.__get_ip4_hdrlen()
+        if hdrlen < 28: return
+
+        self.__mbuf.offset = hdrlen
+        byte_sport = self.__mbuf.get_part(2)
+        src_port = utils.bytes2number(byte_sport)
+
+        rules = self.__port_mapv4.find_rule_for_out(byte_saddr, protocol, src_port)
+        if not rules: return
+
+        in_key, byte_src_ip, p, port = rules
+        ippkts.modify_ip4address(byte_saddr, self.__mbuf, flags=0)
+        ippkts.modify_port(port, self.__mbuf, flags=0)
+
+        self.__mbuf.offset = 0
+        message = self.__mbuf.get_data()
+
+        self.send_msg_to_tunnel(proto_utils.ACT_IPDATA, message)
+
+    def send_msg_to_tunnel(self, action, message):
+        if not self.handler_exists(self.__tunnel_fileno):
+            self.__open_tunnel()
+
+        if not self.handler_exists(self.__tunnel_fileno): return
+
+        handler = self.get_handler(self.__tunnel_fileno)
+        handler.send_msg_to_tunnel(self.session_id, action, message)
+
+    def __handle_ipv6_msg_from_tundev(self):
+        self.__mbuf.offset = 6
+        nexthdr = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 8
+        byte_saddr = self.__mbuf.get_part(16)
+
+        if nexthdr not in self.__support_protocols: return
+
+        self.__mbuf.offset = 40
+
+        byte_sport = self.__mbuf.get_part(2)
+        src_port = utils.bytes2number(byte_sport)
+
+        rules = self.__port_mapv6.find_rule_for_out(byte_saddr, nexthdr, src_port)
+        if not rules: return
+
+        in_key, byte_src_ip, p, port = rules
+        ippkts.modify_ip6address(byte_saddr, self.__mbuf, flags=0)
+        ippkts.modify_port(port, self.__mbuf, flags=0)
+
+        self.__mbuf.offset = 0
+        message = self.__mbuf.get_data()
+
+        self.send_msg_to_tunnel(proto_utils.ACT_IPDATA, message)
+
     def handle_msg_from_tundev(self, message):
         """处理来TUN设备的数据包
         :param message:
@@ -132,24 +192,10 @@ class _fdslight_pm_client(dispatcher.dispatcher):
 
         if ip_ver not in (4, 6,): return
 
-        action = proto_utils.ACT_IPDATA
-        is_ipv6 = False
-
         if ip_ver == 4:
-            self.__mbuf.offset = 9
-            nexthdr = self.__mbuf.get_part(1)
-            self.__mbuf.offset = 16
-            byte_daddr = self.__mbuf.get_part(4)
-            fa = socket.AF_INET
+            self.__handle_ipv4_msg_from_tundev()
         else:
-            is_ipv6 = True
-            self.__mbuf.offset = 6
-            nexthdr = self.__mbuf.get_part(1)
-            self.__mbuf.offset = 24
-            byte_daddr = self.__mbuf.get_part(16)
-            fa = socket.AF_INET6
-
-        self.send_msg_to_tunnel(action, message)
+            self.__handle_ipv6_msg_from_tundev()
 
     def __get_ip4_hdrlen(self):
         self.__mbuf.offset = 0
@@ -174,11 +220,11 @@ class _fdslight_pm_client(dispatcher.dispatcher):
         payload_length = utils.bytes2number(self.__mbuf.get_part(2))
 
         if payload_length != self.__mbuf.payload_size: return
-        if protocol not in self.__support_ip4_protocols: return
+        if protocol not in self.__support_protocols: return
 
         self.__mbuf.offset = hdrlen + 2
         byte_dst_port = self.__mbuf.get_part(2)
-        dst_port, = struct.unpack("H", byte_dst_port)
+        dst_port = utils.bytes2number(byte_dst_port)
 
         rule = self.__port_mapv4.find_rule_for_in(byte_dst_addr, protocol, dst_port)
         if not rule: return
@@ -191,6 +237,7 @@ class _fdslight_pm_client(dispatcher.dispatcher):
         _, rewrite_dest_ip, p, rewrite_dest_port = rule
         # 此处重写IP地址
         ippkts.modify_ip4address(rewrite_dest_ip, self.__mbuf, flags=1)
+        ippkts.modify_port(rewrite_dest_port, self.__mbuf, flags=1)
         self.__mbuf.offset = 0
         byte_data = self.__mbuf.get_data()
         self.get_handler(self.__tundev_fileno).msg_from_tunnel(byte_data)
@@ -203,14 +250,15 @@ class _fdslight_pm_client(dispatcher.dispatcher):
         self.__mbuf.offset = 6
         nexthdr = self.__mbuf.get_part(1)
 
-        if nexthdr not in self.__support_ip6_protocols: return
+        if nexthdr not in self.__support_protocols: return
 
-        self.__mbuf.offset = 40
-        nexthdr = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 24
+        byte_dst_addr = self.__mbuf.get_part(16)
+        self.__mbuf.offset = 42
         byte_dst_port = self.__mbuf.get_part(2)
-        dst_port, = struct.unpack("H", byte_dst_port)
+        dst_port = utils.bytes2number(byte_dst_port)
 
-        rule = self.__port_mapv6.find_rule(nexthdr, dst_port)
+        rule = self.__port_mapv6.find_rule_for_in(byte_dst_addr, nexthdr, dst_port)
         if not rule: return
 
         self.__mbuf.offset = 8
@@ -222,7 +270,7 @@ class _fdslight_pm_client(dispatcher.dispatcher):
             self.set_route(src_addr, prefix=132, is_ipv6=True)
         # 此处重写IP地址
         byte_rewrite, extra_data = rule
-        ippkts.modify_ip4address(byte_rewrite, self.__mbuf, flags=1)
+        ippkts.modify_ip6address(byte_rewrite, self.__mbuf, flags=1)
         self.__mbuf.offset = 0
         byte_data = self.__mbuf.get_data()
         self.get_handler(self.__tundev_fileno).msg_from_tunnel(byte_data)
@@ -445,7 +493,7 @@ class _fdslight_pm_client(dispatcher.dispatcher):
         return path
 
 
-def __start_service(mode, debug):
+def __start_service(debug):
     if not debug and os.path.isfile(PID_FILE):
         print("the fdsl_pm_client process exists")
         return
@@ -468,10 +516,10 @@ def __start_service(mode, debug):
     cls = _fdslight_pm_client()
 
     if debug:
-        cls.ioloop(mode, debug, configs)
+        cls.ioloop(debug, configs)
         return
     try:
-        cls.ioloop(mode, debug, configs)
+        cls.ioloop(debug, configs)
     except:
         logging.print_error()
 
@@ -489,7 +537,7 @@ def __update_rules():
     pid = proc.get_pid(PID_FILE)
 
     if pid < 0:
-        print("fdslight process not exists")
+        print("fdslight port map process not exists")
         return
 
     os.kill(pid, signal.SIGUSR1)
@@ -497,8 +545,8 @@ def __update_rules():
 
 def main():
     help_doc = """
-    -d      debug | start | stop    debug,start or stop application
-    -u      rules                     update port map rules
+    -d      debug | start | stop     debug,start or stop application
+    -u      rules                      update port map rules
     """
     try:
         opts, args = getopt.getopt(sys.argv[1:], "u:m:d:", [])
@@ -506,18 +554,15 @@ def main():
         print(help_doc)
         return
     d = ""
-    m = ""
     u = ""
 
     for k, v in opts:
         if k == "-u":
             u = v
             break
-
-        if k == "-m": m = v
         if k == "-d": d = v
 
-    if not d and not m and not u:
+    if not d and not u:
         print(help_doc)
         return
 
@@ -532,14 +577,12 @@ def main():
         print(help_doc)
         return
 
-    if m not in ("local", "gateway"):
-        print(help_doc)
-        return
-
     if d in ("start", "debug",):
-        debug = False
-        if d == "debug": debug = True
-        __start_service(m, debug)
+        if d == "debug":
+            debug = True
+        else:
+            debug = False
+        __start_service(debug)
         return
 
     if d == "stop": __stop_service()
