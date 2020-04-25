@@ -39,8 +39,7 @@ class _fdslight_pm_server(dispatcher.dispatcher):
 
     __crypto_configs = None
 
-    __support_ip4_protocols = (6, 17, 132, 136,)
-    __support_ip6_protocols = (6, 17, 132, 136,)
+    __support_protocols = (6, 17, 132, 136,)
 
     __tundev_fileno = -1
 
@@ -94,6 +93,15 @@ class _fdslight_pm_server(dispatcher.dispatcher):
             print("crypto configfile should be json file")
             sys.exit(-1)
 
+        conn_config = self.__configs["connection"]
+        mod_name = "freenet.port_map_access.%s" % conn_config["access_module"]
+
+        try:
+            access = importlib.import_module(mod_name)
+        except ImportError:
+            print("cannot found access module %s" % mod_name)
+            sys.exit(-1)
+
         enable_ipv6 = bool(int(conn_config["enable_ipv6"]))
         listen_port = int(conn_config["port"])
         conn_timeout = int(conn_config["conn_timeout"])
@@ -106,6 +114,8 @@ class _fdslight_pm_server(dispatcher.dispatcher):
 
         over_http = bool(int(conn_config["tunnel_over_http"]))
         self.__mbuf = utils.mbuf()
+
+        self.__access = access.access(self)
 
         if enable_ipv6:
             self.__tcp6_fileno = self.create_handler(-1, tunnels.tcp_tunnel, listen6, self.__tcp_crypto,
@@ -132,27 +142,152 @@ class _fdslight_pm_server(dispatcher.dispatcher):
         return hdrlen
 
     def myloop(self):
-        pass
+        self.__access.loop()
+
+    def __handle_ipv4_msg_from_tunnel(self, session_id, data_size):
+        self.__mbuf.offset = 9
+        protocol = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 12
+        byte_saddr = self.__mbuf.get_part(4)
+        if protocol not in self.__support_protocols: return
+
+        hdrlen = self.__get_ip4_hdrlen()
+        self.__mbuf.offset = hdrlen
+        byte_sport = self.__mbuf.get_part(2)
+        src_port = utils.bytes2number(byte_sport)
+
+        rs = self.__access.get_map_rule(byte_saddr, protocol, src_port)
+        if not rs: return
+        _id, key = rs
+        # 会话ID不一致就丢弃数据包
+        if session_id != _id: return
+
+        if not self.__access.handle_packet_from_recv(key, data_size): return
+
+        self.__mbuf.offset = 0
+        self.get_handler(self.__tundev_fileno).handle_msg_from_tunnel(self.__mbuf.get_data())
+
+    def __handle_ipv6_msg_from_tunnel(self, session_id, data_size):
+        self.__mbuf.offset = 6
+        nexthdr = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 8
+        byte_saddr = self.__mbuf.get_part(16)
+
+        if nexthdr not in self.__support_protocols: return
+
+        self.__mbuf.offset = 40
+
+        byte_sport = self.__mbuf.get_part(2)
+        src_port = utils.bytes2number(byte_sport)
+
+        rs = self.__access.get_map_rule(byte_saddr, nexthdr, src_port)
+        if not rs: return
+        _id, key = rs
+        if _id != session_id: return
+        if not self.__access.handle_packet_from_recv(key, data_size): return
+
+        self.__mbuf.offset = 0
+        self.get_handler(self.__tundev_fileno).handle_msg_from_tunnel(self.__mbuf.get_data())
 
     def handle_msg_from_tunnel(self, fileno, session_id, address, action, message):
+        if action != proto_utils.ACT_IPDATA: return
         size = len(message)
 
-    def __handle_msg_from_tun_for_ipv4(self):
-        pass
+        ip_ver = self.__mbuf.ip_version()
+        if ip_ver not in (4, 6,): return
 
-    def __handle_msg_from_tun_for_ipv6(self):
-        pass
+        self.__access.set_session(session_id, fileno, address)
+        self.__mbuf.copy2buf(message)
+
+        if ip_ver == 4:
+            if size < 28: return
+            self.__handle_ipv4_msg_from_tunnel(session_id, size)
+        else:
+            if size < 48: return
+            self.__handle_ipv6_msg_from_tunnel(session_id, size)
+
+    def __handle_msg_from_tun_for_ipv4(self, data_size):
+        self.__mbuf.offset = 9
+        protocol = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 16
+        byte_daddr = self.__mbuf.get_part(4)
+        if protocol not in self.__support_protocols: return
+
+        hdrlen = self.__get_ip4_hdrlen()
+        self.__mbuf.offset = hdrlen
+        byte_dport = self.__mbuf.get_part(2)
+        dst_port = utils.bytes2number(byte_dport)
+
+        rs = self.__access.get_map_rule(byte_daddr, protocol, dst_port)
+        if not rs: return
+        _id, key = rs
+        if not self.__access.handle_packet_for_send(key, data_size): return
+
+        self.__mbuf.offset = 0
+        self.__send_msg_to_tunnel(_id, key, self.__mbuf.get_data())
+
+    def __handle_msg_from_tun_for_ipv6(self, data_size):
+        self.__mbuf.offset = 6
+        nexthdr = self.__mbuf.get_part(1)
+        self.__mbuf.offset = 24
+        byte_daddr = self.__mbuf.get_part(16)
+
+        if nexthdr not in self.__support_protocols: return
+
+        self.__mbuf.offset = 40
+
+        byte_dport = self.__mbuf.get_part(2)
+        dst_port = utils.bytes2number(byte_dport)
+
+        rs = self.__access.get_map_rule(byte_daddr, nexthdr, dst_port)
+        if not rs: return
+        _id, key = rs
+
+        if not self.__access.handle_packet_for_send(key, data_size): return
+
+        self.__mbuf.offset = 0
+        self.__send_msg_to_tunnel(_id, key, self.__mbuf.get_data())
+
+    def __send_msg_to_tunnel(self, session_id, key, message):
+        # 查找ID所对应的文件描述符是否存在
+        fd, address = self.__access.get_session(session_id)
+        if not self.handler_exists(fd): return
+        # 查找ID所对应的文件描述符是否存在
+        self.get_handler(fd).send_msg(session_id, address, proto_utils.ACT_IPDATA, message)
 
     def send_msg_to_tunnel_from_tun(self, packet):
+        size = len(packet)
         self.__mbuf.copy2buf(packet)
         ver = self.__mbuf.ip_version()
 
         if ver not in (4, 6,): return
 
         if ver == 4:
-            self.__handle_msg_from_tun_for_ipv4()
+            self.__handle_msg_from_tun_for_ipv4(size)
         else:
-            self.__handle_msg_from_tun_for_ipv6()
+            self.__handle_msg_from_tun_for_ipv6(size)
+
+    def set_port_map(self, address, protocol, port, is_ipv6=False):
+        if not is_ipv6:
+            cmds = [
+                "iptables -t nat -I PREROUTING -p %s --dport %d -j DNAT --to %s" % (protocol, port, address,),
+                "iptables -t nat -I POSTROUTING -p %s --dport %d -j MASQUERADE" % (protocol, port,)
+            ]
+        else:
+            cmds = []
+
+        for cmd in cmds: os.system(cmd)
+
+    def set_route(self, host, prefix=None, is_ipv6=False):
+        if is_ipv6:
+            s = "-6"
+            if not prefix: prefix = 128
+        else:
+            s = ""
+            if not prefix: prefix = 32
+
+        cmd = "ip %s route add %s/%s dev %s" % (s, host, prefix, self.__DEVNAME)
+        os.system(cmd)
 
     def __sig_handle(self, signum, frame):
         pass

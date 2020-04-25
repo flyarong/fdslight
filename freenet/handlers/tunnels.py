@@ -157,6 +157,8 @@ class _tcp_tunnel_handler(tcp_handler.tcp_handler):
     def send_msg(self, session_id, address, action, message):
         # 检查session_id是否一致
         if session_id != self.__session_id: return
+        # 如果流量加载在HTTP协议上并且没有握手成功那么丢弃数据包
+        if self.__over_http and not self.__http_handshake_ok: return
 
         sent_pkt = self.__encrypt.build_packet(session_id, action, message)
         self.writer.write(sent_pkt)
